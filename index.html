@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control de Combustible TQL</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#1e3a8a">
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --card-bg: #1e293b;
+      --primary: #2563eb;
+      --alert: #ef4444;
+      --success: #10b981;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: var(--bg-dark); color: var(--text); padding: 16px; display: flex; justify-content: center; }
+    .app-container { width: 100%; max-width: 500px; display: flex; flex-direction: column; gap: 16px; }
+
+    .header { background: linear-gradient(135deg, #1e3a8a, #3b82f6); padding: 16px; border-radius: 12px; display: flex; justify-content: space-between; align-items: center; }
+    .status-badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+    .status-badge.online { background-color: var(--success); color: white; }
+    .status-badge.offline { background-color: var(--alert); color: white; }
+
+    .card { background: var(--card-bg); padding: 16px; border-radius: 12px; border: 1px solid #334155; }
+    h2 { font-size: 1.1rem; margin-bottom: 12px; color: #60a5fa; }
+
+    .form-group { margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 0.85rem; color: var(--text-muted); }
+    input, select { background: #0f172a; border: 1px solid #475569; padding: 10px; border-radius: 6px; color: white; font-size: 1rem; }
+    
+    .alert-box { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--alert); color: #fca5a5; padding: 10px; border-radius: 6px; font-size: 0.85rem; display: none; margin-bottom: 12px; }
+
+    button { background: var(--primary); color: white; border: none; padding: 12px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; }
+    button:disabled { opacity: 0.5; }
+
+    .record-item { background: #0f172a; padding: 12px; border-radius: 8px; border-left: 4px solid var(--primary); margin-bottom: 8px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center; }
+    .record-item.sobreconsumo { border-left-color: var(--alert); }
+    .record-status { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; background: #334155; }
+    .record-status.synced { background: var(--success); color: white; }
+    .record-status.pending { background: #eab308; color: black; }
+  </style>
+</head>
+<body>
+
+<div class="app-container">
+  <div class="header">
+    <div>
+      <h1 style="font-size: 1.2rem;">Combustible TQL</h1>
+      <small id="sync-info" style="color: #cbd5e1; font-size: 0.75rem;">Precargado en local</small>
+    </div>
+    <span id="connection-status" class="status-badge online">ONLINE</span>
+  </div>
+
+  <!-- Formulario de Carga -->
+  <div class="card">
+    <h2>Nuevo Registro de Carga</h2>
+    
+    <div class="form-group">
+      <label>Equipo</label>
+      <select id="select-equipo" onchange="evaluarConsumo()"></select>
+    </div>
+
+    <div class="form-group">
+      <label>Ruta / Tramo Recorrido</label>
+      <input type="text" id="ruta-realizada" readonly>
+    </div>
+
+    <div class="form-group">
+      <label>Litros Cargados</label>
+      <input type="number" id="litros-cargados" placeholder="0.00" oninput="evaluarConsumo()">
+    </div>
+
+    <div id="alert-sobreconsumo" class="alert-box">
+      ⚠️ <strong>Alerta de Sobreconsumo:</strong> Los litros exceden la tolerancia estimada para la ruta habitual de este equipo. El registro se enviará a la tabla de <em>Revisión</em>.
+    </div>
+
+    <div class="form-group">
+      <label>Kilometraje Actual</label>
+      <input type="number" id="km-actuales" placeholder="Ej: 145200">
+    </div>
+
+    <button id="btn-guardar" onclick="guardarRegistro()">Registrar Carga</button>
+  </div>
+
+  <!-- Historial y Estatus Local -->
+  <div class="card">
+    <h2>Registros Locales y Estatus</h2>
+    <div id="lista-registros"></div>
+  </div>
+</div>
+
+<script>
+  // REEMPLAZA ESTA URL CON TU ENLACE DE DEPLIEGUE DE GOOGLE APPS SCRIPT
+  const GAS_URL = "https://script.google.com/macros/s/AKfycbyrO4oHHfq1_LhJwAWv8RVgX2wWr4mRdQgjOlGG7CNYJH4niYdAaozaLJnflTU3nxRP/exec";
+
+  // Catálogo Base Precargado por defecto (Fallback Offline)
+  const CATALOGO_DEFAULT = [
+    { id: "E-001", nombre: "Camión Mack #1", rutaHabitual: "La Encrucijada - Turmero (4 viajes)", consumoPromedio: 45, toleranciaPct: 15 },
+    { id: "E-002", nombre: "Camión Chuto Kenworth", rutaHabitual: "Cagua - Valencia (2 viajes)", consumoPromedio: 80, toleranciaPct: 15 }
+  ];
+
+  let esSobreconsumoActual = false;
+  let litrosEsperadosActual = 0;
+
+  // Registrar Service Worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW error:', err));
+  }
+
+  // Inicialización de la aplicación
+  window.addEventListener('DOMContentLoaded', () => {
+    actualizarEstadoRed();
+    precargarCatalogo();
+    renderizarRegistros();
+
+    // Solicitar permiso para notificaciones flotantes en el dispositivo
+    if ("Notification" in window && Notification.permission !== "granted") {
+      Notification.requestPermission();
+    }
+
+    // Eventos de conectividad
+    window.addEventListener('online', () => { 
+      actualizarEstadoRed(); 
+      notificarYSincronizar(); 
+    });
+    
+    window.addEventListener('offline', actualizarEstadoRed);
+  });
+
+  function actualizarEstadoRed() {
+    const statusEl = document.getElementById('connection-status');
+    if (navigator.onLine) {
+      statusEl.textContent = 'ONLINE';
+      statusEl.className = 'status-badge online';
+    } else {
+      statusEl.textContent = 'OFFLINE';
+      statusEl.className = 'status-badge offline';
+    }
+  }
+
+  // 1. Precarga Automática del Catálogo
+  async function precargarCatalogo() {
+    let catalogo = JSON.parse(localStorage.getItem('catalogo_equipos'));
+    
+    if (navigator.onLine && GAS_URL.startsWith("http")) {
+      try {
+        const res = await fetch(`${GAS_URL}?action=getCatalogo`);
+        const json = await res.json();
+        if (json.status === 'success') {
+          catalogo = json.data;
+          localStorage.setItem('catalogo_equipos', JSON.stringify(catalogo));
+        }
+      } catch (e) {
+        console.warn("No se pudo actualizar catálogo desde red, usando versión local.");
+      }
+    }
+
+    if (!catalogo) {
+      catalogo = CATALOGO_DEFAULT;
+      localStorage.setItem('catalogo_equipos', JSON.stringify(catalogo));
+    }
+
+    const select = document.getElementById('select-equipo');
+    select.innerHTML = catalogo.map(e => `<option value="${e.id}">${e.nombre}</option>`).join('');
+    evaluarConsumo();
+  }
+
+  // 2. Estimación y Alerta por Sobreconsumo
+  function evaluarConsumo() {
+    const catalogo = JSON.parse(localStorage.getItem('catalogo_equipos')) || CATALOGO_DEFAULT;
+    const equipoId = document.getElementById('select-equipo').value;
+    const equipo = catalogo.find(e => e.id === equipoId);
+    
+    if (!equipo) return;
+
+    document.getElementById('ruta-realizada').value = equipo.rutaHabitual;
+    
+    const litrosCargados = parseFloat(document.getElementById('litros-cargados').value) || 0;
+    const limitePermitido = equipo.consumoPromedio * (1 + (equipo.toleranciaPct / 100));
+    
+    litrosEsperadosActual = equipo.consumoPromedio;
+    const alertBox = document.getElementById('alert-sobreconsumo');
+
+    if (litrosCargados > limitePermitido) {
+      esSobreconsumoActual = true;
+      alertBox.style.display = 'block';
+    } else {
+      esSobreconsumoActual = false;
+      alertBox.style.display = 'none';
+    }
+  }
+
+  // 3. Guardado en Cola Local y Notificación de Carga Offline
+  function guardarRegistro() {
+    const equipoId = document.getElementById('select-equipo').value;
+    const litros = parseFloat(document.getElementById('litros-cargados').value);
+    const km = parseFloat(document.getElementById('km-actuales').value);
+
+    if (!litros || !km) {
+      alert("Por favor complete todos los campos.");
+      return;
+    }
+
+    const nuevoRegistro = {
+      idLocal: 'LOC-' + Date.now(),
+      fechaLocal: new Date().toLocaleString(),
+      fechaServidor: null,
+      idEquipo: equipoId,
+      litrosCargados: litros,
+      litrosEsperados: litrosEsperadosActual,
+      kmActuales: km,
+      rutaRealizada: document.getElementById('ruta-realizada').value,
+      esSobreconsumo: esSobreconsumoActual,
+      sincronizado: false
+    };
+
+    const cola = JSON.parse(localStorage.getItem('cola_registros')) || [];
+    cola.push(nuevoRegistro);
+    localStorage.setItem('cola_registros', JSON.stringify(cola));
+
+    // Resetear formulario
+    document.getElementById('litros-cargados').value = '';
+    document.getElementById('km-actuales').value = '';
+    evaluarConsumo();
+    renderizarRegistros();
+
+    // Notificación flotante 1: Carga en modo Offline
+    if (!navigator.onLine && "Notification" in window && Notification.permission === "granted") {
+      navigator.serviceWorker.ready.then(registration => {
+        registration.showNotification("Reporte Guardado Offline ⚠️", {
+          body: "Sin conexión. Tu carga se sincronizará automáticamente al conectarte a internet.",
+          icon: "icon-192.png",
+          badge: "icon-192.png",
+          vibrate: [200, 100, 200]
+        });
+      });
+    }
+
+    // Si hay conexión inmediata, enviar de una vez
+    if (navigator.onLine) {
+      sincronizarPendientes();
+    }
+  }
+
+  // 4. Notificación y Sincronización al recuperar Internet
+  async function notificarYSincronizar() {
+    let cola = JSON.parse(localStorage.getItem('cola_registros')) || [];
+    const pendientes = cola.filter(r => !r.sincronizado);
+
+    if (pendientes.length === 0) return;
+
+    // Notificación flotante 2: Recuperación de Red
+    if ("Notification" in window && Notification.permission === "granted") {
+      navigator.serviceWorker.ready.then(registration => {
+        registration.showNotification("Conexión Restablecida 📶", {
+          body: `Se detectó internet. Subiendo ${pendientes.length} reporte(s) a Google Sheets...`,
+          icon: "icon-192.png",
+          badge: "icon-192.png",
+          vibrate: [100, 50, 100]
+        });
+      });
+    }
+
+    await sincronizarPendientes();
+  }
+
+  // Envío efectivo hacia el Apps Script Backend
+  async function sincronizarPendientes() {
+    if (!GAS_URL.startsWith("http")) return;
+
+    let cola = JSON.parse(localStorage.getItem('cola_registros')) || [];
+    const pendientes = cola.filter(r => !r.sincronizado);
+    if (pendientes.length === 0) return;
+
+    for (let reg of pendientes) {
+      try {
+        const res = await fetch(GAS_URL, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'registrarConsumo', payload: reg })
+        });
+        const json = await res.json();
+        
+        if (json.status === 'success') {
+          reg.sincronizado = true;
+          reg.fechaServidor = json.fechaServidor;
+          reg.idRegistroServidor = json.idRegistro;
+        }
+      } catch (e) {
+        console.error("Error al sincronizar registro:", reg.idLocal, e);
+      }
+    }
+
+    localStorage.setItem('cola_registros', JSON.stringify(cola));
+    renderizarRegistros();
+  }
+
+  // Renderizado Visual del Historial y Estatus
+  function renderizarRegistros() {
+    const cola = JSON.parse(localStorage.getItem('cola_registros')) || [];
+    const container = document.getElementById('lista-registros');
+
+    if (cola.length === 0) {
+      container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.85rem;">No hay registros cargados localmente.</p>`;
+      return;
+    }
+
+    container.innerHTML = cola.slice().reverse().map(r => `
+      <div class="record-item ${r.esSobreconsumo ? 'sobreconsumo' : ''}">
+        <div>
+          <strong>Equipo: ${r.idEquipo}</strong> - ${r.litrosCargados}L
+          <br><small style="color: var(--text-muted);">Local: ${r.fechaLocal}</small>
+          ${r.fechaServidor ? `<br><small style="color: var(--success);">Servidor: ${new Date(r.fechaServidor).toLocaleString()}</small>` : ''}
+          ${r.esSobreconsumo ? '<br><small style="color: var(--alert);">⚠️ Sobreconsumo detectado</small>' : ''}
+        </div>
+        <span class="record-status ${r.sincronizado ? 'synced' : 'pending'}">
+          ${r.sincronizado ? 'Sincronizado' : 'En Cola Offline'}
+        </span>
+      </div>
+    `).join('');
+  }
+</script>
+</body>
+</html>
