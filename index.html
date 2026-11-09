@@ -49,13 +49,6 @@
 </head>
 <body>
 
-<div id="login-container" class="login-box">
-  <h2>Acceso de Choferes</h2>
-  <input type="email" id="login-gmail" placeholder="Correo Gmail" required>
-  <input type="password" id="login-pin" placeholder="PIN de 4 dígitos" maxlength="4" required>
-  <button id="btn-login" onclick="intentarLogin()">Ingresar</button>
-</div>
-
 <!-- Tu formulario de siempre, oculto al inicio -->
 <div id="app-container" style="display: none;">
   <!-- Campos de carga de combustible -->
@@ -112,38 +105,6 @@
 <script>
   // REEMPLAZA ESTA URL CON TU ENLACE DE DEPLIEGUE DE GOOGLE APPS SCRIPT
   const GAS_URL = "https://script.google.com/macros/s/AKfycbyrO4oHHfq1_LhJwAWv8RVgX2wWr4mRdQgjOlGG7CNYJH4niYdAaozaLJnflTU3nxRP/exec";
-
-function intentarLogin() {
-  var gmail = document.getElementById("login-gmail").value;
-  var pin = document.getElementById("login-pin").value;
-
-  var datosAcceso = {
-    accion: "login",
-    gmail: gmail,
-    pin: pin
-  };
-
-  fetch("TU_URL_DE_APPS_SCRIPT", {
-    method: "POST",
-    body: JSON.stringify(datosAcceso)
-  })
-  .then(response => response.json())
-  .then(data => {
-    if (data.status === "success") {
-      // Guardamos en la memoria local que ya está logueado
-      localStorage.setItem("usuarioLogueado", data.nombre);
-      
-      // Ocultamos el login y mostramos la app
-      document.getElementById("login-container").style.display = "none";
-      document.getElementById("app-container").style.display = "block";
-    } else {
-      alert("Acceso denegado. Verifique su correo y PIN, o contacte al administrador.");
-    }
-  })
-  .catch(error => {
-    console.error("Error de conexión:", error);
-  });
-}
 
   // Catálogo Base Precargado por defecto (Fallback Offline)
   const CATALOGO_DEFAULT = [
